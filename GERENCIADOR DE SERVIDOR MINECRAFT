@@ -1,0 +1,2529 @@
+import ctypes
+import hashlib
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import threading
+import time
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import zipfile
+
+
+class WorldGuardPanel:
+
+  def __init__(self, parent_notebook, get_server_process_callback, log_callback):
+    self.parent = parent_notebook
+    self.get_process = get_server_process_callback
+    self.log_cmd = log_callback
+
+    self.tab = tk.Frame(self.parent, bg="#1e1e2e")
+    self.parent.add(self.tab, text="🛡 WorldGuard")
+
+    self.setup_widgets()
+
+  def setup_widgets(self):
+    main_frame = tk.Frame(self.tab, bg="#1e1e2e")
+    main_frame.pack(fill="both", expand=True, padx=15, pady=15)
+
+    # Título
+    tk.Label(
+        main_frame,
+        text="Gerenciador Visual de Regiões - WorldGuard",
+        fg="#89b4fa",
+        bg="#1e1e2e",
+        font=("Segoe UI", 12, "bold"),
+    ).pack(anchor="w", pady=(0, 15))
+
+    # Seção 1: Nome da Região
+    region_frame = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=15, pady=12
+    )
+    region_frame.pack(fill="x", pady=(0, 15))
+
+    tk.Label(
+        region_frame,
+        text="Nome da Região Alvo (ex: spawn, loja, arena):",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 5))
+
+    self.entry_region = tk.Entry(
+        region_frame,
+        bg="#313244",
+        fg="#cdd6f4",
+        insertbackground="white",
+        font=("Segoe UI", 10),
+        bd=1,
+    )
+    self.entry_region.pack(fill="x", pady=(0, 5))
+    self.entry_region.insert(0, "spawn")
+
+    # Seção 2: Flags Rápidas (Botões)
+    flags_frame = tk.LabelFrame(
+        main_frame,
+        text=" ⚡ Flags Comuns (Bloquear / Permitir) ",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+        padx=15,
+        pady=15,
+    )
+    flags_frame.pack(fill="both", expand=True, pady=(0, 15))
+
+    # Grid de botões para Flags
+    flags_config = [
+        ("PvP: Bloquear (Deny)", "pvp", "deny", "#f38ba8"),
+        ("PvP: Permitir (Allow)", "pvp", "allow", "#a6e3a1"),
+        ("Fogo (Fire-Spread): Bloquear", "fire-spread", "deny", "#f38ba8"),
+        ("Monstros (Mobs): Bloquear", "mob-spawning", "deny", "#f38ba8"),
+        ("Entrada (Entry): Permitir", "entry", "allow", "#a6e3a1"),
+        ("Entrada (Entry): Bloquear", "entry", "deny", "#f38ba8"),
+        (
+            "Quebra de Blocos (Build): Bloquear",
+            "build",
+            "deny",
+            "#f38ba8",
+        ),
+        ("Quebra de Blocos (Build): Permitir", "build", "allow", "#a6e3a1"),
+    ]
+
+    for idx, (label, flag, value, color) in enumerate(flags_config):
+      r = idx // 2
+      c = idx % 2
+      btn = tk.Button(
+          flags_frame,
+          text=label,
+          bg=color,
+          fg="#11111b",
+          font=("Segoe UI", 9, "bold"),
+          bd=0,
+          padx=10,
+          pady=6,
+          cursor="hand2",
+          command=lambda f=flag, v=value: self.apply_flag(f, v),
+      )
+      btn.grid(row=r, column=c, sticky="ew", padx=5, pady=5)
+
+    flags_frame.grid_columnconfigure(0, weight=1)
+    flags_frame.grid_columnconfigure(1, weight=1)
+
+    # Seção 3: Comandos Personalizados / Extras
+    custom_frame = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=15, pady=12
+    )
+    custom_frame.pack(fill="x")
+
+    tk.Label(
+        custom_frame,
+        text="Outras Ações Úteis:",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 5))
+
+    btn_row = tk.Frame(custom_frame, bg="#181825")
+    btn_row.pack(fill="x")
+
+    tk.Button(
+        btn_row,
+        text="🔍 Info da Região",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=10,
+        pady=5,
+        cursor="hand2",
+        command=lambda: self.run_wg_command("region info"),
+    ).pack(side=tk.LEFT, expand=True, fill="x", padx=2)
+
+    tk.Button(
+        btn_row,
+        text="📋 Listar Regiões",
+        bg="#f9e2af",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=10,
+        pady=5,
+        cursor="hand2",
+        command=lambda: self.run_wg_command("region list"),
+    ).pack(side=tk.LEFT, expand=True, fill="x", padx=2)
+
+  def apply_flag(self, flag, value):
+    region = self.entry_region.get().strip()
+    if not region:
+      messagebox.showwarning(
+          "Aviso", "Digite o nome da região primeiro!", parent=self.tab
+      )
+      return
+
+    cmd = f"rg flag {region} {flag} {value}"
+    self.execute_console(cmd)
+
+  def run_wg_command(self, action):
+    region = self.entry_region.get().strip()
+    if not region and "info" in action:
+      messagebox.showwarning(
+          "Aviso", "Digite o nome da região primeiro!", parent=self.tab
+      )
+      return
+
+    cmd = f"rg {action} {region}" if region else "rg list"
+    self.execute_console(cmd)
+
+  def execute_console(self, cmd):
+    process = self.get_process()
+    if process and process.poll() is None:
+      try:
+        process.stdin.write(cmd + "\n")
+        process.stdin.flush()
+        self.log_cmd(f"✔ WorldGuard executado: /{cmd}")
+        messagebox.showinfo(
+            "Comando Enviado", f"Comando aplicado com sucesso:\n/{cmd}"
+        )
+      except Exception as e:
+        messagebox.showerror(
+            "Erro", f"Falha ao enviar comando:\n{str(e)}", parent=self.tab
+        )
+    else:
+      messagebox.showerror(
+          "Erro",
+          "O servidor precisa estar ligado para aplicar regras de regiao!",
+          parent=self.tab,
+      )
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PLUGINS_DIR = os.path.join(BASE_DIR, "plugins")
+BACKUPS_DIR = os.path.join(BASE_DIR, "backups")
+PROP_FILE = os.path.join(BASE_DIR, "server.properties")
+ICON_PATH = os.path.join(BASE_DIR, "diamond.ico")
+DB_NAME = os.path.join(BASE_DIR, "users.db")
+os.chdir(BASE_DIR)
+
+
+# --- 1. BANCO DE DADOS E FUNÇÕES DE SEGURANÇA ---
+def init_db():
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+        )
+    """)
+  conn.commit()
+  conn.close()
+
+
+def hash_password(password):
+  return hashlib.sha256(password.encode()).hexdigest()
+
+
+# --- 2. TELA DE LOGIN E CADASTRO ---
+class LoginWindow:
+
+  def __init__(self, root):
+    self.root = root
+    self.root.title("END-HC - Autenticação")
+    self.root.geometry("380x420")
+    self.root.resizable(False, False)
+    self.root.configure(bg="#1e1e2e")
+
+    if os.path.exists(ICON_PATH):
+      try:
+        self.root.iconbitmap(ICON_PATH)
+      except Exception:
+        pass
+
+    init_db()
+    self.create_widgets()
+
+  def create_widgets(self):
+    tk.Label(
+        self.root,
+        text="END-HC",
+        fg="#89b4fa",
+        bg="#1e1e2e",
+        font=("Segoe UI Black", 26, "bold"),
+    ).pack(pady=(30, 2))
+
+    tk.Label(
+        self.root,
+        text="Painel de Controle - Login",
+        fg="#a6adc8",
+        bg="#1e1e2e",
+        font=("Segoe UI", 9, "italic"),
+    ).pack(pady=(0, 20))
+
+    form_frame = tk.Frame(self.root, bg="#181825", padx=20, pady=20)
+    form_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+
+    tk.Label(
+        form_frame,
+        text="Usuário:",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+    self.user_entry = tk.Entry(
+        form_frame,
+        bg="#313244",
+        fg="#cdd6f4",
+        insertbackground="white",
+        font=("Segoe UI", 10),
+        bd=1,
+        relief="flat",
+    )
+    self.user_entry.pack(fill="x", pady=(0, 10), ipady=3)
+    self.user_entry.focus()
+
+    tk.Label(
+        form_frame,
+        text="Senha:",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+    self.pass_entry = tk.Entry(
+        form_frame,
+        show="*",
+        bg="#313244",
+        fg="#cdd6f4",
+        insertbackground="white",
+        font=("Segoe UI", 10),
+        bd=1,
+        relief="flat",
+    )
+    self.pass_entry.pack(fill="x", pady=(0, 15), ipady=3)
+    self.pass_entry.bind("<Return>", lambda e: self.fazer_login())
+
+    btn_login = tk.Button(
+        form_frame,
+        text="Entrar",
+        bg="#a6e3a1",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        pady=6,
+        cursor="hand2",
+        command=self.fazer_login,
+    )
+    btn_login.pack(fill="x", pady=(0, 5))
+
+    btn_cadastrar = tk.Button(
+        form_frame,
+        text="Criar Conta",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        pady=6,
+        cursor="hand2",
+        command=self.fazer_cadastro,
+    )
+    btn_cadastrar.pack(fill="x")
+
+  def fazer_login(self):
+    usuario = self.user_entry.get().strip()
+    senha = self.pass_entry.get().strip()
+
+    if not usuario or not senha:
+      messagebox.showwarning(
+          "Aviso", "Preencha todos os campos!", parent=self.root
+      )
+      return
+
+    senha_hash = hash_password(senha)
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM users WHERE username = ? AND password = ?",
+        (usuario, senha_hash),
+    )
+    user = cursor.fetchone()
+    conn.close()
+
+    if user:
+      self.abrir_painel_principal()
+    else:
+      messagebox.showerror(
+          "Erro", "Usuário ou senha incorretos!", parent=self.root
+      )
+
+  def fazer_cadastro(self):
+    usuario = self.user_entry.get().strip()
+    senha = self.pass_entry.get().strip()
+
+    if not usuario or not senha:
+      messagebox.showwarning(
+          "Aviso",
+          "Preencha usuário e senha para cadastrar!",
+          parent=self.root,
+      )
+      return
+
+    senha_hash = hash_password(senha)
+    try:
+      conn = sqlite3.connect(DB_NAME)
+      cursor = conn.cursor()
+      cursor.execute(
+          "INSERT INTO users (username, password) VALUES (?, ?)",
+          (usuario, senha_hash),
+      )
+      conn.commit()
+      conn.close()
+      messagebox.showinfo(
+          "Sucesso",
+          "Conta criada com sucesso! Agora faça o login.",
+          parent=self.root,
+      )
+    except sqlite3.IntegrityError:
+      messagebox.showerror(
+          "Erro", "Este nome de usuário já existe!", parent=self.root
+      )
+
+  def abrir_painel_principal(self):
+    self.root.destroy()
+    main_root = tk.Tk()
+    ENDHCControlCenter(main_root)
+    main_root.mainloop()
+
+
+# --- 3. CLASSE PRINCIPAL DO PAINEL DE CONTROLE ---
+class ENDHCControlCenter:
+
+  def __init__(self, root):
+    self.root = root
+    self.root.title("END-HC - Painel de Controle Integrado")
+    self.root.geometry("980x660")
+    self.root.resizable(False, False)
+    self.root.configure(bg="#1e1e2e")
+
+    self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    if os.path.exists(ICON_PATH):
+      try:
+        self.root.iconbitmap(ICON_PATH)
+      except Exception:
+        pass
+
+    self.process = None
+    self.current_plugin_jar = None
+    self.current_yml_file = None
+    self.current_yml_path = None
+    self.is_inside_jar = False
+    self.online_players = {}
+
+    self.auto_backup_active = False
+    self.auto_backup_thread = None
+
+    self.ensure_directories()
+
+    title_label = tk.Label(
+        root,
+        text="END-HC",
+        fg="#89b4fa",
+        bg="#1e1e2e",
+        font=("Segoe UI Black", 24, "bold"),
+    )
+    title_label.pack(pady=(8, 0))
+
+    sub_title = tk.Label(
+        root,
+        text="Central de Gerenciamento do Servidor Minecraft",
+        fg="#a6adc8",
+        bg="#1e1e2e",
+        font=("Segoe UI", 9, "italic"),
+    )
+    sub_title.pack(pady=(0, 6))
+
+    self.notebook = ttk.Notebook(root)
+    self.notebook.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+
+    style = ttk.Style()
+    style.theme_use("default")
+    style.configure(
+        "TNotebook", background="#1e1e2e", borderwidth=0, tabmargins=[2, 5, 2, 0]
+    )
+    style.configure(
+        "TNotebook.Tab",
+        background="#181825",
+        foreground="#a6adc8",
+        padding=[12, 6],
+        font=("Segoe UI", 9, "bold"),
+        borderWidth=0,
+    )
+    style.map(
+        "TNotebook.Tab",
+        background=[("selected", "#313244")],
+        foreground=[("selected", "#89b4fa")],
+    )
+
+    style.configure(
+        "Treeview",
+        background="#11111b",
+        foreground="#cdd6f4",
+        fieldbackground="#11111b",
+        rowheight=24,
+        borderwidth=0,
+    )
+    style.configure(
+        "Treeview.Heading",
+        background="#313244",
+        foreground="#89b4fa",
+        font=("Segoe UI", 9, "bold"),
+        borderwidth=0,
+    )
+    style.map("Treeview", background=[("selected", "#45475a")])
+
+    self.tab_server = tk.Frame(self.notebook, bg="#1e1e2e")
+    self.tab_plugins = tk.Frame(self.notebook, bg="#1e1e2e")
+    self.tab_live = tk.Frame(self.notebook, bg="#1e1e2e")
+    self.tab_permissions = tk.Frame(self.notebook, bg="#1e1e2e")
+    self.tab_luckperms = tk.Frame(self.notebook, bg="#1e1e2e")
+    self.tab_backups = tk.Frame(self.notebook, bg="#1e1e2e")
+    self.tab_config = tk.Frame(self.notebook, bg="#1e1e2e")
+
+    self.notebook.add(self.tab_server, text="🖥 Servidor & Console")
+    self.notebook.add(self.tab_plugins, text="🧩 Plugins")
+    self.notebook.add(self.tab_live, text="💬 Chat & Jogadores")
+    self.notebook.add(self.tab_permissions, text="🛡 Cargos & Chat")
+    self.notebook.add(self.tab_luckperms, text="🔑 LuckPerms & Perms")
+    self.notebook.add(self.tab_backups, text="📦 Backups")
+    self.notebook.add(self.tab_config, text="⚙ Configurações")
+
+    self.setup_server_tab()
+    self.setup_plugins_tab()
+    self.setup_live_tab()
+    self.setup_permissions_tab()
+    self.setup_luckperms_tab()
+    self.setup_backups_tab()
+    self.setup_config_tab()
+
+    WorldGuardPanel(self.notebook, lambda: self.process, self.log_cmd_status)
+
+    self.update_online_timer()
+
+  def ensure_directories(self):
+    if not os.path.exists(PLUGINS_DIR):
+      os.makedirs(PLUGINS_DIR)
+    if not os.path.exists(BACKUPS_DIR):
+      os.makedirs(BACKUPS_DIR)
+
+  def get_server_groups(self):
+    """Lê os grupos reais salvos na pasta do LuckPerms ou usa lista padrão expandida se não achar"""
+    groups_found = set(["default", "vip", "moderador", "admin", "dono"])
+    
+    lp_dirs = [
+        os.path.join(PLUGINS_DIR, "LuckPerms", "yaml-storage", "groups"),
+        os.path.join(PLUGINS_DIR, "LuckPerms", "groups")
+    ]
+    
+    for gdir in lp_dirs:
+      if os.path.exists(gdir):
+        for f in os.listdir(gdir):
+          if f.endswith(".yml") or f.endswith(".yaml"):
+            gname = os.path.splitext(f)[0]
+            groups_found.add(gname)
+            
+    return sorted(list(groups_found))
+
+  def on_closing(self):
+    self.auto_backup_active = False
+    if self.process and self.process.poll() is None:
+      self.lbl_status.config(
+          text="Status: SALVANDO E FECHANDO...", fg="#fab387"
+      )
+      self.lbl_info.config(text="Encerrando o servidor Java...")
+      self.root.update()
+      try:
+        self.process.stdin.write("stop\n")
+        self.process.stdin.flush()
+        self.process.wait(timeout=10)
+      except Exception:
+        if self.process:
+          self.process.kill()
+    self.root.destroy()
+
+  # --- ABA 1: SERVIDOR & CONSOLE ---
+  def setup_server_tab(self):
+    main_frame = tk.Frame(self.tab_server, bg="#1e1e2e")
+    main_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+    left_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=15, pady=10
+    )
+    left_panel.pack(side=tk.LEFT, fill="both", expand=True, padx=(0, 5))
+
+    self.lbl_status = tk.Label(
+        left_panel,
+        text="Status: OFFLINE",
+        fg="#f38ba8",
+        bg="#181825",
+        font=("Segoe UI", 13, "bold"),
+    )
+    self.lbl_status.pack(pady=(5, 10))
+
+    btn_frame = tk.Frame(left_panel, bg="#181825")
+    btn_frame.pack(pady=5)
+
+    self.btn_start = tk.Button(
+        btn_frame,
+        text="▶ Ligar Servidor",
+        bg="#a6e3a1",
+        fg="#11111b",
+        font=("Segoe UI", 10, "bold"),
+        padx=10,
+        pady=5,
+        bd=0,
+        cursor="hand2",
+        command=self.start_server,
+    )
+    self.btn_start.pack(side=tk.LEFT, padx=5)
+
+    self.btn_stop = tk.Button(
+        btn_frame,
+        text="⏹ Parar Servidor",
+        bg="#f38ba8",
+        fg="#11111b",
+        font=("Segoe UI", 10, "bold"),
+        padx=10,
+        pady=5,
+        bd=0,
+        cursor="hand2",
+        command=self.stop_server,
+    )
+    self.btn_stop.pack(side=tk.LEFT, padx=5)
+
+    self.lbl_info = tk.Label(
+        left_panel,
+        text="Servidor desligado.",
+        fg="#a6adc8",
+        bg="#181825",
+        font=("Segoe UI", 9, "italic"),
+    )
+    self.lbl_info.pack(pady=(12, 5))
+
+    self.progress = ttk.Progressbar(
+        left_panel, orient="horizontal", length=300, mode="indeterminate"
+    )
+    self.progress.pack(pady=5)
+
+    cmd_frame = tk.Frame(left_panel, bg="#181825")
+    cmd_frame.pack(fill="x", pady=(15, 5))
+
+    tk.Label(
+        cmd_frame,
+        text="Enviar Comando:",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+
+    entry_btn_box = tk.Frame(cmd_frame, bg="#181825")
+    entry_btn_box.pack(fill="x")
+
+    self.cmd_entry = tk.Entry(
+        entry_btn_box,
+        bg="#313244",
+        fg="#cdd6f4",
+        insertbackground="white",
+        font=("Segoe UI", 10),
+        bd=1,
+        relief="flat",
+    )
+    self.cmd_entry.pack(side=tk.LEFT, expand=True, fill="x", padx=(0, 5), ipady=3)
+    self.cmd_entry.bind("<Return>", lambda event: self.send_command())
+
+    self.btn_send = tk.Button(
+        entry_btn_box,
+        text="Enviar",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=12,
+        pady=3,
+        cursor="hand2",
+        command=self.send_command,
+    )
+    self.btn_send.pack(side=tk.RIGHT)
+
+    native_frame = tk.Frame(left_panel, bg="#181825")
+    native_frame.pack(fill="both", expand=True, pady=(10, 0))
+
+    tk.Label(
+        native_frame,
+        text="⚡ Comandos Rápidos do Minecraft:",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+
+    listbox_container = tk.Frame(native_frame, bg="#181825")
+    listbox_container.pack(fill="both", expand=True)
+
+    self.native_listbox = tk.Listbox(
+        listbox_container,
+        bg="#11111b",
+        fg="#a6e3a1",
+        selectbackground="#45475a",
+        selectforeground="#a6e3a1",
+        font=("Consolas", 9),
+        height=6,
+        bd=0,
+        highlightthickness=0,
+    )
+    self.native_listbox.pack(side=tk.LEFT, fill="both", expand=True)
+
+    native_scroll = tk.Scrollbar(
+        listbox_container, command=self.native_listbox.yview
+    )
+    native_scroll.pack(side=tk.RIGHT, fill="y")
+    self.native_listbox.config(yscrollcommand=native_scroll.set)
+
+    self.native_commands = [
+        ("☀️ Clima: Limpar Chuva (Clear)", "weather clear"),
+        ("🌧 Clima: Iniciar Chuva (Rain)", "weather rain"),
+        ("⚡ Clima: Tempestade (Thunder)", "weather thunder"),
+        ("⏰ Tempo: Colocar de Dia (Day)", "time set day"),
+        ("🌙 Tempo: Colocar de Noite (Night)", "time set night"),
+        ("🕛 Tempo: Meio-dia (noon)", "time set noon"),
+        ("🕛 Tempo: Meia-noite (midnight)", "time set midnight"),
+        ("🔄 Salvar Mundo (Save All)", "save-all"),
+    ]
+
+    for desc, cmd in self.native_commands:
+      self.native_listbox.insert(tk.END, desc)
+
+    self.native_listbox.bind(
+        "<Double-Button-1>", lambda event: self.exec_native_command()
+    )
+
+    tk.Button(
+        native_frame,
+        text="▶ Executar Comando Selecionado (ou Duplo Clique)",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        pady=5,
+        cursor="hand2",
+        command=self.exec_native_command,
+    ).pack(fill="x", pady=(5, 0))
+
+    right_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=10, pady=10
+    )
+    right_panel.pack(side=tk.RIGHT, fill="both", expand=True, padx=(5, 0))
+
+    tk.Label(
+        right_panel,
+        text="📟 Status dos Comandos",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w", pady=(0, 5))
+
+    self.cmd_log = tk.Text(
+        right_panel,
+        bg="#11111b",
+        fg="#a6e3a1",
+        insertbackground="white",
+        font=("Consolas", 9),
+        wrap="word",
+        bd=0,
+    )
+    self.cmd_log.pack(expand=True, fill="both")
+    self.cmd_log.insert(tk.END, "Aguardando envio de comandos...\n")
+
+  def exec_native_command(self):
+    selection = self.native_listbox.curselection()
+    if not selection:
+      messagebox.showwarning(
+          "Aviso", "Selecione um comando na lista abaixo!", parent=self.root
+      )
+      return
+    idx = selection[0]
+    desc, cmd = self.native_commands[idx]
+
+    if self.process and self.process.poll() is None:
+      try:
+        self.process.stdin.write(cmd + "\n")
+        self.process.stdin.flush()
+        self.log_cmd_status(f"✔ Executado nativo: /{cmd}")
+      except Exception as e:
+        self.log_cmd_status(f"❌ Erro ao executar comando: {str(e)}")
+    else:
+      self.log_cmd_status(
+          f"❌ Erro: Servidor OFFLINE! (Não foi possível rodar /{cmd})"
+      )
+      messagebox.showerror(
+          "Erro", "O servidor precisa estar ligado!", parent=self.root
+      )
+
+  def find_jar_file(self):
+    for file in os.listdir(BASE_DIR):
+      if file.startswith("paper") and (
+          file.endswith(".jar") or not os.path.splitext(file)[1]
+      ):
+        return file
+    return "paper-26.2-121.jar"
+
+  def start_server(self):
+    if self.process is None:
+      jar_file = self.find_jar_file()
+      self.lbl_status.config(text="Status: INICIANDO...", fg="#fab387")
+      self.lbl_info.config(text="Carregando mapa e plugins...")
+      self.progress.start(12)
+      self.log_cmd_status("[PAINEL] Iniciando servidor...")
+      command = ["java", "-Xms2G", "-Xmx4G", "-jar", jar_file, "nogui"]
+      try:
+        self.process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            cwd=BASE_DIR,
+        )
+        threading.Thread(target=self.read_output, daemon=True).start()
+      except Exception as e:
+        self.progress.stop()
+        self.lbl_status.config(text="Status: ERRO", fg="#f38ba8")
+        self.lbl_info.config(text=f"Erro ao ligar: {str(e)}")
+        self.log_cmd_status(f"[ERRO] Falha ao ligar: {str(e)}")
+
+  def read_output(self):
+    for line in iter(self.process.stdout.readline, ""):
+      clean_line = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+      if "Done (" in clean_line:
+        self.progress.stop()
+        self.progress["value"] = 100
+        self.lbl_status.config(text="Status: ONLINE 🚀", fg="#a6e3a1")
+        self.lbl_info.config(text="Servidor pronto para receber conexões!")
+        self.log_cmd_status("✔ Servidor ONLINE!")
+      elif "Stopping server" in clean_line:
+        self.lbl_status.config(text="Status: DESLIGANDO...", fg="#fab387")
+        self.lbl_info.config(text="Salvando o mundo...")
+        self.progress.config(mode="indeterminate")
+        self.progress.start(12)
+        self.log_cmd_status("[PAINEL] Desligando servidor...")
+
+      join_match = re.search(
+          r"(\w+)\[.*\] logged in|(\w+) joined the game", clean_line
+      )
+      if join_match:
+        pname = join_match.group(1) or join_match.group(2)
+        self.online_players[pname] = time.time()
+
+      leave_match = re.search(
+          r"(\w+) lost connection|(\w+) left the game", clean_line
+      )
+      if leave_match:
+        pname = leave_match.group(1) or leave_match.group(2)
+        if pname in self.online_players:
+          del self.online_players[pname]
+
+      chat_match = re.search(r"(<[^>]+>\s*.*)", clean_line)
+      if chat_match:
+        self.append_live_chat(chat_match.group(1))
+
+    self.progress.stop()
+    self.progress["value"] = 0
+    self.lbl_status.config(text="Status: OFFLINE", fg="#f38ba8")
+    self.lbl_info.config(text="Servidor desligado.")
+    self.log_cmd_status("[PAINEL] Servidor OFFLINE.")
+    self.online_players.clear()
+    self.process = None
+
+  def send_command(self):
+    cmd = self.cmd_entry.get().strip()
+    if not cmd:
+      return
+    if self.process and self.process.poll() is None:
+      try:
+        self.process.stdin.write(cmd + "\n")
+        self.process.stdin.flush()
+        self.log_cmd_status(f"✔ Executado: /{cmd}")
+        self.cmd_entry.delete(0, tk.END)
+      except Exception as e:
+        self.log_cmd_status(f"❌ Erro ao enviar: {str(e)}")
+    else:
+      self.log_cmd_status(f"❌ Erro: Servidor OFFLINE! ({cmd})")
+
+  def stop_server(self):
+    if self.process and self.process.stdin:
+      self.process.stdin.write("stop\n")
+      self.process.stdin.flush()
+
+  def log_cmd_status(self, message):
+    self.cmd_log.insert(tk.END, message + "\n")
+    self.cmd_log.see(tk.END)
+
+  # --- ABA 2: GERENCIADOR DE PLUGINS ---
+  def setup_plugins_tab(self):
+    main_frame = tk.Frame(self.tab_plugins, bg="#1e1e2e")
+    main_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+    left_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=10, pady=10
+    )
+    left_panel.pack(side=tk.LEFT, fill="both", expand=True, padx=(0, 5))
+
+    header_plugins_frame = tk.Frame(left_panel, bg="#181825")
+    header_plugins_frame.pack(fill="x", pady=(0, 5))
+
+    tk.Label(
+        header_plugins_frame,
+        text="🧩 Plugins Instalados (.jar)",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(side=tk.LEFT)
+
+    self.lbl_plugins_count = tk.Label(
+        header_plugins_frame,
+        text="Ativos: 0",
+        fg="#11111b",
+        bg="#a6e3a1",
+        font=("Segoe UI", 8, "bold"),
+        padx=6,
+        pady=2,
+    )
+    self.lbl_plugins_count.pack(side=tk.RIGHT)
+
+    list_frame = tk.Frame(left_panel, bg="#181825")
+    list_frame.pack(fill="both", expand=True)
+
+    self.plugin_listbox = tk.Listbox(
+        list_frame,
+        bg="#11111b",
+        fg="#cdd6f4",
+        selectbackground="#45475a",
+        selectforeground="#a6e3a1",
+        font=("Consolas", 10),
+        bd=0,
+        highlightthickness=0,
+    )
+    self.plugin_listbox.pack(side=tk.LEFT, fill="both", expand=True)
+
+    scrollbar = tk.Scrollbar(list_frame, command=self.plugin_listbox.yview)
+    scrollbar.pack(side=tk.RIGHT, fill="y")
+    self.plugin_listbox.config(yscrollcommand=scrollbar.set)
+    self.plugin_listbox.bind("<<ListboxSelect>>", self.on_plugin_select)
+
+    btn_list_frame = tk.Frame(left_panel, bg="#181825")
+    btn_list_frame.pack(fill="x", pady=(8, 0))
+
+    tk.Button(
+        btn_list_frame,
+        text="➕ Instalar",
+        bg="#a6e3a1",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=8,
+        pady=5,
+        cursor="hand2",
+        command=self.install_plugin,
+    ).pack(side=tk.LEFT, padx=(0, 4))
+    tk.Button(
+        btn_list_frame,
+        text="🗑 Deletar",
+        bg="#f38ba8",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=8,
+        pady=5,
+        cursor="hand2",
+        command=self.delete_plugin,
+    ).pack(side=tk.LEFT, padx=4)
+    tk.Button(
+        btn_list_frame,
+        text="🔄 Atualizar",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=8,
+        pady=5,
+        cursor="hand2",
+        command=self.load_plugins,
+    ).pack(side=tk.RIGHT)
+
+    right_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=10, pady=10
+    )
+    right_panel.pack(side=tk.RIGHT, fill="both", expand=True, padx=(5, 0))
+
+    top_right_frame = tk.Frame(right_panel, bg="#181825")
+    top_right_frame.pack(fill="x", pady=(0, 5))
+
+    tk.Label(
+        top_right_frame,
+        text="📄 Editor YML:",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(side=tk.LEFT, padx=(0, 5))
+
+    self.combo_yml_files = ttk.Combobox(
+        top_right_frame, state="readonly", width=16
+    )
+    self.combo_yml_files.pack(side=tk.LEFT, padx=(0, 5))
+    self.combo_yml_files.bind(
+        "<<ComboboxSelected>>", self.on_yml_file_selected
+    )
+
+    tk.Button(
+        top_right_frame,
+        text="📁 Pasta",
+        bg="#f9e2af",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=6,
+        pady=3,
+        cursor="hand2",
+        command=self.open_plugins_folder,
+    ).pack(side=tk.RIGHT, padx=(2, 0))
+    tk.Button(
+        top_right_frame,
+        text="💾 Salvar",
+        bg="#a6e3a1",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=6,
+        pady=3,
+        cursor="hand2",
+        command=self.save_yml_file,
+    ).pack(side=tk.RIGHT, padx=2)
+    tk.Button(
+        top_right_frame,
+        text="🔍 Buscar",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=6,
+        pady=3,
+        cursor="hand2",
+        command=self.open_search_dialog,
+    ).pack(side=tk.RIGHT, padx=2)
+
+    editor_container = tk.Frame(right_panel, bg="#181825")
+    editor_container.pack(expand=True, fill="both")
+
+    self.info_text = tk.Text(
+        editor_container,
+        bg="#11111b",
+        fg="#a6e3a1",
+        insertbackground="white",
+        font=("Consolas", 9),
+        wrap="none",
+        bd=0,
+    )
+    scroll_y = tk.Scrollbar(
+        editor_container, orient="vertical", command=self.info_text.yview
+    )
+    scroll_x = tk.Scrollbar(
+        editor_container, orient="horizontal", command=self.info_text.xview
+    )
+    self.info_text.config(
+        yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set
+    )
+
+    self.info_text.grid(row=0, column=0, sticky="nsew")
+    scroll_y.grid(row=0, column=1, sticky="ns")
+    scroll_x.grid(row=1, column=0, sticky="ew")
+    editor_container.grid_rowconfigure(0, weight=1)
+    editor_container.grid_columnconfigure(0, weight=1)
+
+    self.load_plugins()
+
+  def open_search_dialog(self):
+    search_win = tk.Toplevel(self.root)
+    search_win.title("Localizar no Editor")
+    search_win.geometry("320x110")
+    search_win.resizable(False, False)
+    search_win.configure(bg="#1e1e2e")
+    search_win.transient(self.root)
+    search_win.grab_set()
+
+    self.root.update_idletasks()
+    x = self.root.winfo_rootx() + (self.root.winfo_width() // 2) - (320 // 2)
+    y = self.root.winfo_rooty() + (self.root.winfo_height() // 2) - (110 // 2)
+    search_win.geometry(f"320x110+{x}+{y}")
+
+    tk.Label(
+        search_win,
+        text="Digite o termo ou linha:",
+        fg="#cdd6f4",
+        bg="#1e1e2e",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", padx=15, pady=(10, 2))
+
+    entry_query = tk.Entry(
+        search_win,
+        bg="#313244",
+        fg="#cdd6f4",
+        insertbackground="white",
+        font=("Segoe UI", 10),
+        relief="flat",
+    )
+    entry_query.pack(fill="x", padx=15, pady=2, ipady=3)
+    entry_query.focus()
+
+    def do_search():
+      query = entry_query.get()
+      if not query:
+        return
+      pos = "1.0"
+      first_found = None
+      while True:
+        pos = self.info_text.search(query, pos, stopindex=tk.END, nocase=True)
+        if not pos:
+          break
+        end_pos = f"{pos}+{len(query)}c"
+        self.info_text.tag_add("search_highlight", pos, end_pos)
+        if not first_found:
+          first_found = pos
+        pos = end_pos
+      if first_found:
+        self.info_text.see(first_found)
+      else:
+        messagebox.showinfo(
+            "Busca", "Termo não encontrado no arquivo.", parent=search_win
+        )
+
+    tk.Button(
+        search_win,
+        text="Buscar Próximo",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=10,
+        pady=5,
+        cursor="hand2",
+        command=do_search,
+    ).pack(pady=8)
+    entry_query.bind("<Return>", lambda e: do_search())
+
+  def load_plugins(self):
+    self.plugin_listbox.delete(0, tk.END)
+    self.ensure_directories()
+    plugins = [f for f in os.listdir(PLUGINS_DIR) if f.endswith(".jar")]
+
+    qtd_plugins = len(plugins)
+    if hasattr(self, "lbl_plugins_count"):
+      self.lbl_plugins_count.config(text=f"Ativos: {qtd_plugins}")
+
+    if not plugins:
+      self.plugin_listbox.insert(tk.END, " (Nenhum plugin instalado)")
+      return
+    for p in plugins:
+      self.plugin_listbox.insert(tk.END, p)
+
+  def get_clean_plugin_name(self, jar_name):
+    base = jar_name.replace(".jar", "")
+    base = re.sub(
+        r"[-_](Bukkit|Paper|Spigot|v?\d+.*)", "", base, flags=re.IGNORECASE
+    )
+    return base.strip()
+
+  def on_plugin_select(self, event):
+    selection = self.plugin_listbox.curselection()
+    if not selection:
+      return
+    plugin_name = self.plugin_listbox.get(selection[0])
+    if "(Nenhum plugin" in plugin_name:
+      return
+
+    self.current_plugin_jar = plugin_name
+    plugin_jar_path = os.path.join(PLUGINS_DIR, plugin_name)
+    yml_options = []
+    self.yml_paths_map = {}
+
+    clean_name = self.get_clean_plugin_name(plugin_name)
+    matched_dir = None
+    if os.path.exists(PLUGINS_DIR):
+      for d in os.listdir(PLUGINS_DIR):
+        full_d = os.path.join(PLUGINS_DIR, d)
+        if os.path.isdir(full_d):
+          if d.lower() in plugin_name.lower() or d.lower() == clean_name.lower():
+            matched_dir = full_d
+            break
+
+    if matched_dir:
+      for root, dirs, files in os.walk(matched_dir):
+        for f in files:
+          if f.endswith(".yml") or f.endswith(".yaml"):
+            rel_path = os.path.relpath(os.path.join(root, f), matched_dir)
+            label = f"📁 {rel_path}"
+            yml_options.append(label)
+            self.yml_paths_map[label] = {
+                "type": "file",
+                "path": os.path.join(root, f),
+            }
+
+    if os.path.exists(plugin_jar_path):
+      try:
+        with zipfile.ZipFile(plugin_jar_path, "r") as jar:
+          for name in jar.namelist():
+            if name.endswith(".yml") or name.endswith(".yaml"):
+              label = f"📦 {name} (JAR)"
+              yml_options.append(label)
+              self.yml_paths_map[label] = {
+                  "type": "jar",
+                  "jar_path": plugin_jar_path,
+                  "internal_path": name,
+              }
+      except Exception as e:
+        print(f"Erro ao ler jar: {e}")
+
+    if yml_options:
+      self.combo_yml_files["values"] = yml_options
+      self.combo_yml_files.current(0)
+      self.on_yml_file_selected(None)
+    else:
+      self.combo_yml_files["values"] = []
+      self.combo_yml_files.set("")
+      self.info_text.delete("1.0", tk.END)
+      self.info_text.insert(tk.END, "⚠ Nenhum arquivo .yml encontrado.")
+
+  def on_yml_file_selected(self, event):
+    selected_label = self.combo_yml_files.get()
+    if not selected_label or selected_label not in self.yml_paths_map:
+      return
+    info = self.yml_paths_map[selected_label]
+    self.info_text.delete("1.0", tk.END)
+    if info["type"] == "file":
+      self.is_inside_jar = False
+      self.current_yml_path = info["path"]
+      try:
+        with open(self.current_yml_path, "r", encoding="utf-8") as f:
+          self.info_text.insert(tk.END, f.read())
+      except Exception as e:
+        self.info_text.insert(tk.END, f"❌ Erro:\n{str(e)}")
+    elif info["type"] == "jar":
+      self.is_inside_jar = True
+      self.current_yml_path = (info["jar_path"], info["internal_path"])
+      try:
+        with zipfile.ZipFile(info["jar_path"], "r") as jar:
+          content = jar.read(info["internal_path"]).decode(
+              "utf-8", errors="ignore"
+          )
+          self.info_text.insert(tk.END, content)
+      except Exception as e:
+        self.info_text.insert(tk.END, f"❌ Erro:\n{str(e)}")
+
+  def save_yml_file(self):
+    selected_label = self.combo_yml_files.get()
+    if not selected_label or not self.current_yml_path:
+      messagebox.showwarning("Aviso", "Nenhum arquivo .yml selecionado!")
+      return
+    new_content = self.info_text.get("1.0", tk.END).strip()
+    if not self.is_inside_jar:
+      try:
+        with open(self.current_yml_path, "w", encoding="utf-8") as f:
+          f.write(new_content)
+        messagebox.showinfo("Sucesso", "Arquivo salvo com sucesso!")
+      except Exception as e:
+        messagebox.showerror("Erro", f"Não foi possível salvar:\n{str(e)}")
+    else:
+      jar_path, internal_path = self.current_yml_path
+      temp_path = jar_path + ".tmp"
+      try:
+        with (
+            zipfile.ZipFile(jar_path, "r") as zin,
+            zipfile.ZipFile(temp_path, "w") as zout,
+        ):
+          for item in zin.infolist():
+            buffer = zin.read(item.filename)
+            if item.filename == internal_path:
+              zout.writestr(item, new_content.encode("utf-8"))
+            else:
+              zout.writestr(item, buffer)
+        os.remove(jar_path)
+        os.rename(temp_path, jar_path)
+        messagebox.showinfo("Sucesso", "Arquivo interno do JAR atualizado!")
+      except Exception as e:
+        if os.path.exists(temp_path):
+          os.remove(temp_path)
+        messagebox.showerror("Erro", f"Erro ao alterar JAR:\n{str(e)}")
+
+  def install_plugin(self):
+    file_path = filedialog.askopenfilename(
+        title="Selecionar Plugin", filetypes=[("Arquivos JAR", "*.jar")]
+    )
+    if file_path:
+      filename = os.path.basename(file_path)
+      dest_path = os.path.join(PLUGINS_DIR, filename)
+      try:
+        shutil.copy(file_path, dest_path)
+        messagebox.showinfo("Sucesso", f"Plugin '{filename}' instalado!")
+        self.load_plugins()
+      except Exception as e:
+        messagebox.showerror("Erro", f"Falha ao instalar:\n{str(e)}")
+
+  def delete_plugin(self):
+    selection = self.plugin_listbox.curselection()
+    if not selection:
+      messagebox.showwarning("Aviso", "Selecione um plugin!")
+      return
+    plugin_name = self.plugin_listbox.get(selection[0])
+    if "(Nenhum plugin" in plugin_name:
+      return
+    if messagebox.askyesno("Confirmar", f"Deseja apagar '{plugin_name}'?"):
+      try:
+        os.remove(os.path.join(PLUGINS_DIR, plugin_name))
+        self.load_plugins()
+        self.combo_yml_files["values"] = []
+        self.combo_yml_files.set("")
+        self.info_text.delete("1.0", tk.END)
+        messagebox.showinfo("Sucesso", "Plugin removido!")
+      except Exception as e:
+        messagebox.showerror("Erro", f"Erro ao apagar:\n{str(e)}")
+
+  def open_plugins_folder(self):
+    os.startfile(PLUGINS_DIR)
+
+  # --- ABA 3: CHAT & JOGADORES ---
+  def setup_live_tab(self):
+    main_frame = tk.Frame(self.tab_live, bg="#1e1e2e")
+    main_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+    left_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=10, pady=10
+    )
+    left_panel.pack(side=tk.LEFT, fill="both", expand=True, padx=(0, 5))
+
+    tk.Label(
+        left_panel,
+        text="💬 Chat do Jogo (In-Game)",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w", pady=(0, 5))
+
+    self.live_chat_box = tk.Text(
+        left_panel,
+        bg="#11111b",
+        fg="#f9e2af",
+        insertbackground="white",
+        font=("Consolas", 10),
+        wrap="word",
+        bd=0,
+    )
+    self.live_chat_box.pack(expand=True, fill="both")
+    self.live_chat_box.insert(
+        tk.END, "--- Transmissão do Chat ao Vivo Iniciada ---\n"
+    )
+
+    right_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=10, pady=10
+    )
+    right_panel.pack(side=tk.RIGHT, fill="both", expand=False, padx=(5, 0))
+
+    tk.Label(
+        right_panel,
+        text="🟢 Jogadores Conectados",
+        fg="#a6e3a1",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w", pady=(0, 5))
+
+    self.players_tree = ttk.Treeview(
+        right_panel, columns=("nick", "time"), show="headings", height=8
+    )
+    self.players_tree.heading("nick", text="Jogador")
+    self.players_tree.heading("time", text="Tempo Onl")
+    self.players_tree.column("nick", width=110, anchor="center")
+    self.players_tree.column("time", width=80, anchor="center")
+    self.players_tree.pack(fill="x", pady=(0, 10))
+    self.players_tree.bind(
+        "<<TreeviewSelect>>", lambda e: self.preencher_nome_jogador()
+    )
+
+    mgmt_frame = tk.LabelFrame(
+        right_panel,
+        text=" 🛡 Gestão por Nome ",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+        padx=8,
+        pady=8,
+    )
+    mgmt_frame.pack(fill="both", expand=True)
+
+    tk.Label(
+        mgmt_frame,
+        text="Nome do Jogador:",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9),
+    ).pack(anchor="w", pady=(0, 2))
+
+    self.player_input = tk.Entry(
+        mgmt_frame,
+        bg="#313244",
+        fg="#cdd6f4",
+        insertbackground="white",
+        font=("Segoe UI", 10),
+        bd=1,
+        relief="flat",
+    )
+    self.player_input.pack(fill="x", pady=(0, 8), ipady=3)
+
+    btn_row1 = tk.Frame(mgmt_frame, bg="#181825")
+    btn_row1.pack(fill="x", pady=2)
+    tk.Button(
+        btn_row1,
+        text="👢 Kickar",
+        bg="#fab387",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=6,
+        pady=4,
+        cursor="hand2",
+        command=lambda: self.player_action("kick"),
+    ).pack(side=tk.LEFT, expand=True, fill="x", padx=1)
+    tk.Button(
+        btn_row1,
+        text="🔨 Banir",
+        bg="#f38ba8",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=6,
+        pady=4,
+        cursor="hand2",
+        command=lambda: self.player_action("ban"),
+    ).pack(side=tk.LEFT, expand=True, fill="x", padx=1)
+
+    btn_row2 = tk.Frame(mgmt_frame, bg="#181825")
+    btn_row2.pack(fill="x", pady=2)
+    tk.Button(
+        btn_row2,
+        text="⭐ Dar OP",
+        bg="#a6e3a1",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=6,
+        pady=4,
+        cursor="hand2",
+        command=lambda: self.player_action("op"),
+    ).pack(side=tk.LEFT, expand=True, fill="x", padx=1)
+    tk.Button(
+        btn_row2,
+        text="❌ Tirar OP",
+        bg="#f9e2af",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=6,
+        pady=4,
+        cursor="hand2",
+        command=lambda: self.player_action("deop"),
+    ).pack(side=tk.LEFT, expand=True, fill="x", padx=1)
+
+    btn_row3 = tk.Frame(mgmt_frame, bg="#181825")
+    btn_row3.pack(fill="x", pady=2)
+    tk.Button(
+        btn_row3,
+        text="💎 Criativo",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=6,
+        pady=4,
+        cursor="hand2",
+        command=lambda: self.player_action("creative"),
+    ).pack(side=tk.LEFT, expand=True, fill="x", padx=1)
+    tk.Button(
+        btn_row3,
+        text="⚔ Survival",
+        bg="#b4befe",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=6,
+        pady=4,
+        cursor="hand2",
+        command=lambda: self.player_action("survival"),
+    ).pack(side=tk.LEFT, expand=True, fill="x", padx=1)
+
+    btn_row4 = tk.Frame(mgmt_frame, bg="#181825")
+    btn_row4.pack(fill="x", pady=(2, 0))
+    tk.Button(
+        btn_row4,
+        text="💖 Curar/Alimentar",
+        bg="#fab387",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=6,
+        pady=4,
+        cursor="hand2",
+        command=lambda: self.player_action("heal"),
+    ).pack(fill="x", expand=True, padx=1)
+
+  def preencher_nome_jogador(self):
+    selected_items = self.players_tree.selection()
+    if selected_items:
+      item_values = self.players_tree.item(selected_items[0], "values")
+      if item_values:
+        self.player_input.delete(0, tk.END)
+        self.player_input.insert(0, item_values[0])
+
+  def get_selected_player(self):
+    player = self.player_input.get().strip()
+    if not player:
+      messagebox.showwarning(
+          "Aviso", "Digite o nome do jogador na caixa de texto!"
+      )
+      return None
+    return player
+
+  def player_action(self, action_type):
+    player = self.get_selected_player()
+    if not player:
+      return
+
+    cmd_map = {
+        "kick": f"kick {player} Removido pelo Administrador",
+        "ban": f"ban {player} Banido pelo Painel END-HC",
+        "op": f"op {player}",
+        "deop": f"deop {player}",
+        "creative": f"gamemode creative {player}",
+        "survival": f"gamemode survival {player}",
+        "heal": f"effect give {player} instant_health 1 255 true",
+    }
+
+    cmd = cmd_map.get(action_type)
+    if cmd and self.process and self.process.poll() is None:
+      try:
+        self.process.stdin.write(cmd + "\n")
+        self.process.stdin.flush()
+        self.log_cmd_status(f"✔ Ação executada em {player}: /{cmd}")
+      except Exception as e:
+        messagebox.showerror("Erro", f"Falha ao enviar comando:\n{str(e)}")
+    else:
+      messagebox.showerror("Erro", "O servidor está offline!")
+
+  def append_live_chat(self, msg):
+    self.live_chat_box.insert(tk.END, msg + "\n")
+    self.live_chat_box.see(tk.END)
+
+  def update_online_timer(self):
+    for item in self.players_tree.get_children():
+      self.players_tree.delete(item)
+    now = time.time()
+    for nick, start_t in list(self.online_players.items()):
+      elapsed = int(now - start_t)
+      mins, secs = divmod(elapsed, 60)
+      hours, mins = divmod(mins, 60)
+      time_str = (
+          f"{hours}h {mins}m"
+          if hours > 0
+          else (f"{mins}m {secs}s" if mins > 0 else f"{secs}s")
+      )
+      self.players_tree.insert("", tk.END, values=(nick, time_str))
+    self.root.after(1000, self.update_online_timer)
+
+  # --- ABA 4: CARGOS, CHAT & PERMISSÕES ---
+  def setup_permissions_tab(self):
+    main_frame = tk.Frame(self.tab_permissions, bg="#1e1e2e")
+    main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+    left_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=12, pady=12
+    )
+    left_panel.pack(side=tk.LEFT, fill="both", expand=True, padx=(0, 6))
+
+    tk.Label(
+        left_panel,
+        text="🎨 Configuração de Grupos & Prefixo (LuckPerms)",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w", pady=(0, 10))
+
+    tk.Label(
+        left_panel,
+        text="Selecione o Grupo:",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+
+    server_groups = self.get_server_groups()
+    self.combo_lp_groups = ttk.Combobox(
+        left_panel,
+        values=server_groups,
+        state="normal",
+        font=("Segoe UI", 9),
+    )
+    self.combo_lp_groups.pack(fill="x", pady=(0, 10))
+    self.combo_lp_groups.set(server_groups[0] if server_groups else "default")
+
+    tk.Label(
+        left_panel,
+        text="Novo Prefixo (Ex: &c[Admin] ):",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+
+    self.entry_lp_prefix = tk.Entry(
+        left_panel,
+        bg="#313244",
+        fg="#cdd6f4",
+        insertbackground="white",
+        font=("Segoe UI", 9),
+        bd=1,
+        relief="flat",
+    )
+    self.entry_lp_prefix.pack(fill="x", pady=(0, 10), ipady=3)
+    self.entry_lp_prefix.insert(0, "&7[Membro] ")
+
+    tk.Button(
+        left_panel,
+        text="💾 Aplicar Prefixo ao Grupo",
+        bg="#a6e3a1",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        pady=6,
+        cursor="hand2",
+        command=self.apply_luckperms_prefix,
+    ).pack(fill="x", pady=(0, 15))
+
+    tk.Label(
+        left_panel,
+        text="💬 Formato do Chat (EssentialsChat)",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w", pady=(10, 5))
+
+    tk.Label(
+        left_panel,
+        text="Formato global (suporta {PREFIX}, {DISPLAYNAME}, {MESSAGE}):",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 8),
+        wraplength=400,
+        justify="left",
+    ).pack(anchor="w", pady=(0, 2))
+
+    self.entry_chat_format = tk.Entry(
+        left_panel,
+        bg="#313244",
+        fg="#f9e2af",
+        insertbackground="white",
+        font=("Consolas", 9),
+        bd=1,
+        relief="flat",
+    )
+    self.entry_chat_format.pack(fill="x", pady=(0, 10), ipady=3)
+    self.entry_chat_format.insert(0, "{PREFIX}{DISPLAYNAME}&r: {MESSAGE}")
+
+    tk.Button(
+        left_panel,
+        text="💾 Salvar Formato do Chat",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        pady=6,
+        cursor="hand2",
+        command=self.save_essentials_chat_format,
+    ).pack(fill="x")
+
+    right_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=12, pady=12
+    )
+    right_panel.pack(side=tk.RIGHT, fill="both", expand=True, padx=(6, 0))
+
+    tk.Label(
+        right_panel,
+        text="👤 Atribuir Jogador a Grupo",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w", pady=(0, 10))
+
+    tk.Label(
+        right_panel,
+        text="Nome do Jogador:",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+
+    self.entry_player_perm = tk.Entry(
+        right_panel,
+        bg="#313244",
+        fg="#cdd6f4",
+        insertbackground="white",
+        font=("Segoe UI", 9),
+        bd=1,
+        relief="flat",
+    )
+    self.entry_player_perm.pack(fill="x", pady=(0, 10), ipady=3)
+
+    tk.Label(
+        right_panel,
+        text="Escolher Cargo:",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+
+    self.combo_player_group = ttk.Combobox(
+        right_panel,
+        values=server_groups,
+        state="readonly",
+        font=("Segoe UI", 9),
+    )
+    self.combo_player_group.pack(fill="x", pady=(0, 10))
+    self.combo_player_group.set(server_groups[1] if len(server_groups) > 1 else server_groups[0])
+
+    tk.Button(
+        right_panel,
+        text="⚡ Dar Cargo ao Jogador",
+        bg="#fab387",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        pady=6,
+        cursor="hand2",
+        command=self.assign_player_group,
+    ).pack(fill="x", pady=(0, 20))
+
+    tk.Label(
+        right_panel,
+        text="🛠 Atalhos Rápidos Essentials",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w", pady=(10, 5))
+
+    tk.Button(
+        right_panel,
+        text="📂 Abrir Pasta de Configurações (Essentials/LP)",
+        bg="#f9e2af",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        pady=6,
+        cursor="hand2",
+        command=self.open_essentials_folder,
+    ).pack(fill="x", pady=5)
+
+    tk.Button(
+        right_panel,
+        text="🔄 Recarregar Plugins In-Game (/lp reload & /ess reload)",
+        bg="#f38ba8",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        pady=6,
+        cursor="hand2",
+        command=self.reload_plugins_command,
+    ).pack(fill="x", pady=5)
+
+  # --- ABA 5: LUCKPERMS - GERENCIADOR DE PERMISSÕES E LISTAGEM DE ATIVAS ---
+  def setup_luckperms_tab(self):
+    main_frame = tk.Frame(self.tab_luckperms, bg="#1e1e2e")
+    main_frame.pack(fill="both", expand=True, padx=12, pady=12)
+
+    # Painel Esquerdo: Atribuição e Remoção de Permissões por Grupo
+    left_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=12, pady=12
+    )
+    left_panel.pack(side=tk.LEFT, fill="both", expand=True, padx=(0, 6))
+
+    tk.Label(
+        left_panel,
+        text="🔑 Atribuir / Remover Permissões (LuckPerms)",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w", pady=(0, 10))
+
+    tk.Label(
+        left_panel,
+        text="Selecionar Grupo Alvo:",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+
+    server_groups = self.get_server_groups()
+    self.combo_lp_perm_group = ttk.Combobox(
+        left_panel,
+        values=server_groups,
+        state="normal",
+        font=("Segoe UI", 9),
+    )
+    self.combo_lp_perm_group.pack(fill="x", pady=(0, 10))
+    self.combo_lp_perm_group.set(server_groups[0] if server_groups else "default")
+    self.combo_lp_perm_group.bind("<<ComboboxSelected>>", lambda e: self.carregar_perms_grupo_ativo())
+
+    # SEÇÃO MODIFICADA: Lista Seletor / Dropdown para Nós de Permissão Comuns
+    tk.Label(
+        left_panel,
+        text="Selecione ou Digite o Nó de Permissão:",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(0, 2))
+
+    common_perm_nodes = [
+        "essentials.fly",
+        "essentials.gamemode",
+        "essentials.heal",
+        "essentials.spawn",
+        "essentials.feed",
+        "essentials.kit",
+        "essentials.kick",
+        "essentials.mute",
+        "worldguard.region.bypass",
+        "essentials.*",
+        "worldguard.*",
+        "lp.*",
+        "*"
+    ]
+
+    self.combo_permission_node = ttk.Combobox(
+        left_panel,
+        values=common_perm_nodes,
+        state="normal",
+        font=("Consolas", 9)
+    )
+    self.combo_permission_node.pack(fill="x", pady=(0, 10), ipady=3)
+    self.combo_permission_node.set("essentials.fly")
+
+    btn_perm_box = tk.Frame(left_panel, bg="#181825")
+    btn_perm_box.pack(fill="x", pady=(5, 10))
+
+    tk.Button(
+        btn_perm_box,
+        text="➕ Adicionar Permissão",
+        bg="#a6e3a1",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        pady=6,
+        cursor="hand2",
+        command=lambda: self.alterar_permissao_grupo("set"),
+    ).pack(side=tk.LEFT, expand=True, fill="x", padx=(0, 4))
+
+    tk.Button(
+        btn_perm_box,
+        text="❌ Remover Permissão",
+        bg="#f38ba8",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        pady=6,
+        cursor="hand2",
+        command=lambda: self.alterar_permissao_grupo("unset"),
+    ).pack(side=tk.RIGHT, expand=True, fill="x", padx=(4, 0))
+
+    # Atalhos rápidos de permissões comuns em botões auxiliares
+    tk.Label(
+        left_panel,
+        text="⚡ Atalhos Rápidos:",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(10, 5))
+
+    shortcuts_frame = tk.Frame(left_panel, bg="#181825")
+    shortcuts_frame.pack(fill="x")
+
+    common_perms = [
+        ("Voar (/fly)", "essentials.fly"),
+        ("Gamemode (/gm)", "essentials.gamemode"),
+        ("Curar (/heal)", "essentials.heal"),
+        ("Spawn (/spawn)", "essentials.spawn"),
+    ]
+
+    for label_txt, node_val in common_perms:
+      tk.Button(
+          shortcuts_frame,
+          text=label_txt,
+          bg="#313244",
+          fg="#cdd6f4",
+          font=("Segoe UI", 8),
+          bd=0,
+          pady=4,
+          cursor="hand2",
+          command=lambda n=node_val: self.preencher_node_permissao(n),
+      ).pack(fill="x", pady=2)
+
+    # Painel Direito: Lista de Permissões Ativas no Grupo
+    right_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=12, pady=12
+    )
+    right_panel.pack(side=tk.RIGHT, fill="both", expand=True, padx=(6, 0))
+
+    header_list_perms = tk.Frame(right_panel, bg="#181825")
+    header_list_perms.pack(fill="x", pady=(0, 5))
+
+    tk.Label(
+        header_list_perms,
+        text="📋 Permissões Ativas no Grupo",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(side=tk.LEFT)
+
+    tk.Button(
+        header_list_perms,
+        text="🔄 Consultar Grupo",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=6,
+        pady=3,
+        cursor="hand2",
+        command=self.carregar_perms_grupo_ativo,
+    ).pack(side=tk.RIGHT)
+
+    tree_container = tk.Frame(right_panel, bg="#181825")
+    tree_container.pack(fill="both", expand=True, pady=(5, 10))
+
+    self.perms_tree = ttk.Treeview(
+        tree_container, columns=("node", "status"), show="headings", height=12
+    )
+    self.perms_tree.heading("node", text="Nó de Permissão")
+    self.perms_tree.heading("status", text="Estado")
+    self.perms_tree.column("node", width=220, anchor="w")
+    self.perms_tree.column("status", width=80, anchor="center")
+    self.perms_tree.pack(side=tk.LEFT, fill="both", expand=True)
+
+    tree_scroll = tk.Scrollbar(tree_container, command=self.perms_tree.yview)
+    tree_scroll.pack(side=tk.RIGHT, fill="y")
+    self.perms_tree.config(yscrollcommand=tree_scroll.set)
+    self.perms_tree.bind("<<TreeviewSelect>>", self.preencher_node_selecionado_tree)
+
+    tk.Button(
+        right_panel,
+        text="🗑 Remover Permissão Selecionada da Lista",
+        bg="#f38ba8",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        pady=6,
+        cursor="hand2",
+        command=self.remover_permissao_selecionada_tree,
+    ).pack(fill="x")
+
+  def preencher_node_permissao(self, node):
+    self.combo_permission_node.set(node)
+
+  def alterar_permissao_grupo(self, action_type):
+    group = self.combo_lp_perm_group.get().strip()
+    node = self.combo_permission_node.get().strip()
+    if not group or not node:
+      messagebox.showwarning("Aviso", "Selecione o grupo e o nó de permissão!")
+      return
+
+    cmd = f"lp group {group} permission {action_type} {node}"
+    self.executa_comando_plugin_aba(cmd, f"LuckPerms ({action_type})")
+    self.root.after(800, self.carregar_perms_grupo_ativo)
+
+  def preencher_node_selecionado_tree(self, event):
+    selected = self.perms_tree.selection()
+    if selected:
+      values = self.perms_tree.item(selected[0], "values")
+      if values:
+        self.combo_permission_node.set(values[0])
+
+  def remover_permissao_selecionada_tree(self):
+    selected = self.perms_tree.selection()
+    if not selected:
+      messagebox.showwarning("Aviso", "Selecione uma permissão na tabela da direita!")
+      return
+    values = self.perms_tree.item(selected[0], "values")
+    if values:
+      node = values[0]
+      group = self.combo_lp_perm_group.get().strip()
+      cmd = f"lp group {group} permission unset {node}"
+      self.executa_comando_plugin_aba(cmd, "Remover Permissão da Lista")
+      self.root.after(800, self.carregar_perms_grupo_ativo)
+
+  def carregar_perms_grupo_ativo(self):
+    for item in self.perms_tree.get_children():
+      self.perms_tree.delete(item)
+
+    group = self.combo_lp_perm_group.get().strip()
+    if not group:
+      return
+
+    found_nodes = []
+    lp_group_file = os.path.join(PLUGINS_DIR, "LuckPerms", "yaml-storage", "groups", f"{group}.yml")
+    if not os.path.exists(lp_group_file):
+      lp_group_file = os.path.join(PLUGINS_DIR, "LuckPerms", "groups", f"{group}.yml")
+
+    if os.path.exists(lp_group_file):
+      try:
+        with open(lp_group_file, "r", encoding="utf-8") as f:
+          content = f.read()
+          matches = re.findall(r"['\"]?([a-zA-Z0-9_.-]+)['\"]?:\s*(true|false)", content)
+          for node, status in matches:
+            found_nodes.append((node, status))
+      except Exception:
+        pass
+
+    if not found_nodes:
+      defaults = {
+          "default": [("essentials.spawn", "true"), ("essentials.help", "true")],
+          "vip": [("essentials.fly", "true"), ("essentials.feed", "true"), ("essentials.kit", "true")],
+          "moderador": [("essentials.kick", "true"), ("essentials.mute", "true"), ("worldguard.region.bypass", "true")],
+          "admin": [("essentials.*", "true"), ("worldguard.*", "true"), ("lp.*", "true")],
+          "dono": [("*", "true")]
+      }
+      found_nodes = defaults.get(group, [("plugin.base", "true")])
+
+    for node, status in found_nodes:
+      self.perms_tree.insert("", tk.END, values=(node, status))
+
+  def apply_luckperms_prefix(self):
+    group = self.combo_lp_groups.get().strip()
+    prefix = self.entry_lp_prefix.get().strip()
+    if not group or not prefix:
+      messagebox.showwarning("Aviso", "Preencha o grupo e o prefixo!")
+      return
+    cmd = f'lp group {group} meta setprefix 100 "{prefix}"'
+    self.executa_comando_plugin_aba(cmd, "Prefixo do LuckPerms")
+
+  def assign_player_group(self):
+    player = self.entry_player_perm.get().strip()
+    group = self.combo_player_group.get().strip()
+    if not player:
+      messagebox.showwarning("Aviso", "Digite o nome do jogador!")
+      return
+    cmd = f"lp user {player} parent set {group}"
+    self.executa_comando_plugin_aba(cmd, f"Atribuir cargo a {player}")
+
+  def save_essentials_chat_format(self):
+    new_format = self.entry_chat_format.get().strip()
+    chat_config_path = os.path.join(PLUGINS_DIR, "Essentials", "config.yml")
+
+    if not os.path.exists(chat_config_path):
+      messagebox.showerror(
+          "Erro",
+          "A pasta/config.yml do Essentials não foi encontrada no diretório plugins/Essentials!",
+      )
+      return
+
+    try:
+      with open(chat_config_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+      updated_content = re.sub(
+          r"^(format:\s*['\"].*['\"]|format:\s*.*)$",
+          f"format: '{new_format}'",
+          content,
+          flags=re.MULTILINE,
+      )
+
+      with open(chat_config_path, "w", encoding="utf-8") as f:
+        f.write(updated_content)
+
+      messagebox.showinfo(
+          "Sucesso",
+          "Formato de chat atualizado no config.yml do Essentials!",
+      )
+      self.log_cmd_status("✔ Configuração do EssentialsChat alterada com sucesso.")
+    except Exception as e:
+      messagebox.showerror("Erro", f"Não foi possível atualizar o chat:\n{str(e)}")
+
+  def open_essentials_folder(self):
+    ess_path = os.path.join(PLUGINS_DIR, "Essentials")
+    if os.path.exists(ess_path):
+      os.startfile(ess_path)
+    elif os.path.exists(PLUGINS_DIR):
+      os.startfile(PLUGINS_DIR)
+    else:
+      messagebox.showwarning("Aviso", "Pasta de plugins não encontrada.")
+
+  def reload_plugins_command(self):
+    if self.process and self.process.poll() is None:
+      try:
+        self.process.stdin.write("lp reload\n")
+        self.process.stdin.write("ess reload\n")
+        self.process.stdin.flush()
+        self.log_cmd_status(
+            "✔ Comandos de recarga enviados (/lp reload & /ess reload)"
+        )
+        messagebox.showinfo("Sucesso", "Comandos de recarga enviados ao console!")
+      except Exception as e:
+        messagebox.showerror("Erro", f"Erro ao enviar comandos: {str(e)}")
+    else:
+      messagebox.showerror(
+          "Erro",
+          "O servidor precisa estar ligado para recarregar os plugins!",
+      )
+
+  def executa_comando_plugin_aba(self, cmd, acao_nome):
+    if self.process and self.process.poll() is None:
+      try:
+        self.process.stdin.write(cmd + "\n")
+        self.process.stdin.flush()
+        self.log_cmd_status(f"✔ {acao_nome}: /{cmd}")
+        messagebox.showinfo("Sucesso", f"Comando executado no servidor:\n/{cmd}")
+      except Exception as e:
+        messagebox.showerror("Erro", f"Falha ao executar comando:\n{str(e)}")
+    else:
+      messagebox.showerror(
+          "Erro",
+          "O servidor precisa estar ligado para aplicar alterações de permissão!",
+      )
+
+  # --- ABA 6: BACKUPS ---
+  def setup_backups_tab(self):
+    main_frame = tk.Frame(self.tab_backups, bg="#1e1e2e")
+    main_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+    left_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=10, pady=10
+    )
+    left_panel.pack(side=tk.LEFT, fill="both", expand=True, padx=(0, 5))
+
+    tk.Label(
+        left_panel,
+        text="📂 Arquivos de Backup (.zip)",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w", pady=(0, 5))
+
+    list_frame = tk.Frame(left_panel, bg="#181825")
+    list_frame.pack(fill="both", expand=True)
+
+    self.backup_listbox = tk.Listbox(
+        list_frame,
+        bg="#11111b",
+        fg="#cdd6f4",
+        selectbackground="#45475a",
+        selectforeground="#a6e3a1",
+        font=("Consolas", 9),
+        bd=0,
+        highlightthickness=0,
+    )
+    self.backup_listbox.pack(side=tk.LEFT, fill="both", expand=True)
+    scrollbar = tk.Scrollbar(list_frame, command=self.backup_listbox.yview)
+    scrollbar.pack(side=tk.RIGHT, fill="y")
+    self.backup_listbox.config(yscrollcommand=scrollbar.set)
+
+    btn_list_frame = tk.Frame(left_panel, bg="#181825")
+    btn_list_frame.pack(fill="x", pady=(8, 0))
+
+    tk.Button(
+        btn_list_frame,
+        text="🗑 Deletar",
+        bg="#f38ba8",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=8,
+        pady=5,
+        cursor="hand2",
+        command=self.delete_backup,
+    ).pack(side=tk.LEFT)
+    tk.Button(
+        btn_list_frame,
+        text="📁 Abrir Pasta",
+        bg="#f9e2af",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=8,
+        pady=5,
+        cursor="hand2",
+        command=lambda: os.startfile(BACKUPS_DIR),
+    ).pack(side=tk.LEFT, padx=5)
+    tk.Button(
+        btn_list_frame,
+        text="🔄 Atualizar",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=8,
+        pady=5,
+        cursor="hand2",
+        command=self.load_backups,
+    ).pack(side=tk.RIGHT)
+
+    right_panel = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=10, pady=10
+    )
+    right_panel.pack(side=tk.RIGHT, fill="both", expand=True, padx=(5, 0))
+
+    tk.Label(
+        right_panel,
+        text="⚡ Ações de Backup",
+        fg="#89b4fa",
+        bg="#181825",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w", pady=(0, 10))
+
+    tk.Button(
+        right_panel,
+        text="📦 Criar Backup Agora",
+        bg="#a6e3a1",
+        fg="#11111b",
+        font=("Segoe UI", 10, "bold"),
+        bd=0,
+        pady=8,
+        cursor="hand2",
+        command=self.trigger_manual_backup,
+    ).pack(fill="x", pady=(0, 15))
+
+    tk.Label(
+        right_panel,
+        text="⏱ Backup Automático Programado",
+        fg="#cdd6f4",
+        bg="#181825",
+        font=("Segoe UI", 9, "bold"),
+    ).pack(anchor="w", pady=(5, 2))
+
+    timer_frame = tk.Frame(right_panel, bg="#181825")
+    timer_frame.pack(anchor="w", pady=5)
+    tk.Label(
+        timer_frame,
+        text="Intervalo (minutos):",
+        fg="#a6adc8",
+        bg="#181825",
+        font=("Segoe UI", 9),
+    ).pack(side=tk.LEFT)
+
+    self.spin_interval = tk.Spinbox(
+        timer_frame,
+        from_=5,
+        to=1440,
+        width=5,
+        bg="#313244",
+        fg="#cdd6f4",
+        bd=1,
+        relief="flat",
+    )
+    self.spin_interval.delete(0, tk.END)
+    self.spin_interval.insert(0, "60")
+    self.spin_interval.pack(side=tk.LEFT, padx=5)
+
+    self.btn_toggle_auto = tk.Button(
+        right_panel,
+        text="▶ Ativar Rotina Automática",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        pady=6,
+        cursor="hand2",
+        command=self.toggle_auto_backup,
+    )
+    self.btn_toggle_auto.pack(fill="x", pady=10)
+
+    self.lbl_auto_status = tk.Label(
+        right_panel,
+        text="Status: Desativado",
+        fg="#f38ba8",
+        bg="#181825",
+        font=("Segoe UI", 9, "italic"),
+    )
+    self.lbl_auto_status.pack(anchor="w")
+    self.load_backups()
+
+  def load_backups(self):
+    self.backup_listbox.delete(0, tk.END)
+    self.ensure_directories()
+    files = sorted(
+        [f for f in os.listdir(BACKUPS_DIR) if f.endswith(".zip")], reverse=True
+    )
+    if not files:
+      self.backup_listbox.insert(tk.END, " (Nenhum backup encontrado)")
+      return
+    for f in files:
+      fpath = os.path.join(BACKUPS_DIR, f)
+      size_mb = os.path.getsize(fpath) / (1024 * 1024)
+      self.backup_listbox.insert(tk.END, f"{f} ({size_mb:.1f} MB)")
+
+  def create_backup_zip(self):
+    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"backup_{timestamp}.zip"
+    filepath = os.path.join(BACKUPS_DIR, filename)
+    world_folders = ["world", "world_nether", "world_the_end"]
+    try:
+      with zipfile.ZipFile(filepath, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for folder in world_folders:
+          folder_path = os.path.join(BASE_DIR, folder)
+          if os.path.exists(folder_path):
+            for root, dirs, files in os.walk(folder_path):
+              for file in files:
+                if file == "session.lock":
+                  continue
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, BASE_DIR)
+                zipf.write(full_path, rel_path)
+        if os.path.exists(PROP_FILE):
+          zipf.write(PROP_FILE, "server.properties")
+      return filepath
+    except Exception as e:
+      print(f"Erro ao criar backup: {e}")
+      return None
+
+  def trigger_manual_backup(self):
+    def run():
+      self.log_cmd_status("[BACKUP] Gerando cópia de segurança...")
+      path = self.create_backup_zip()
+      if path:
+        self.load_backups()
+        self.log_cmd_status(f"✔ Backup criado: {os.path.basename(path)}")
+        messagebox.showinfo(
+            "Sucesso", f"Backup gerado:\n{os.path.basename(path)}"
+        )
+      else:
+        messagebox.showerror("Erro", "Falha ao criar backup.")
+
+    threading.Thread(target=run, daemon=True).start()
+
+  def toggle_auto_backup(self):
+    if not self.auto_backup_active:
+      self.auto_backup_active = True
+      self.btn_toggle_auto.config(
+          text="⏹ Desativar Rotina Automática", bg="#f38ba8"
+      )
+      self.lbl_auto_status.config(
+          text="Status: Ativado (Segundo plano)", fg="#a6e3a1"
+      )
+      self.auto_backup_thread = threading.Thread(
+          target=self.auto_backup_loop, daemon=True
+      )
+      self.auto_backup_thread.start()
+    else:
+      self.auto_backup_active = False
+      self.btn_toggle_auto.config(
+          text="▶ Ativar Rotina Automática", bg="#89b4fa"
+      )
+      self.lbl_auto_status.config(text="Status: Desativado", fg="#f38ba8")
+
+  def auto_backup_loop(self):
+    while self.auto_backup_active:
+      try:
+        minutes = int(self.spin_interval.get())
+      except ValueError:
+        minutes = 60
+      time.sleep(minutes * 60)
+      if self.auto_backup_active:
+        self.log_cmd_status("[BACKUP AUTOMÁTICO] Salvando...")
+        self.create_backup_zip()
+        self.root.after(0, self.load_backups)
+
+  def delete_backup(self):
+    selection = self.backup_listbox.curselection()
+    if not selection:
+      messagebox.showwarning("Aviso", "Selecione um backup!")
+      return
+    raw_item = self.backup_listbox.get(selection[0])
+    if "(Nenhum backup" in raw_item:
+      return
+    filename = raw_item.split(" (")[0]
+    if messagebox.askyesno(
+        "Confirmar", f"Deseja apagar o backup '{filename}'?"
+    ):
+      try:
+        os.remove(os.path.join(BACKUPS_DIR, filename))
+        self.load_backups()
+        messagebox.showinfo("Sucesso", "Backup deletado!")
+      except Exception as e:
+        messagebox.showerror("Erro", f"Erro:\n{str(e)}")
+
+  # --- ABA 7: CONFIGURAÇÕES (SERVER.PROPERTIES) ---
+  def setup_config_tab(self):
+    main_frame = tk.Frame(self.tab_config, bg="#1e1e2e")
+    main_frame.pack(fill="both", expand=True, padx=15, pady=10)
+
+    header_frame = tk.Frame(main_frame, bg="#1e1e2e")
+    header_frame.pack(fill="x", pady=(0, 10))
+
+    tk.Label(
+        header_frame,
+        text="⚙ Editor do server.properties",
+        fg="#89b4fa",
+        bg="#1e1e2e",
+        font=("Segoe UI", 11, "bold"),
+    ).pack(side=tk.LEFT)
+    tk.Button(
+        header_frame,
+        text="💾 Salvar",
+        bg="#a6e3a1",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=8,
+        pady=3,
+        cursor="hand2",
+        command=self.save_properties,
+    ).pack(side=tk.RIGHT)
+    tk.Button(
+        header_frame,
+        text="🔄 Recarregar",
+        bg="#89b4fa",
+        fg="#11111b",
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        padx=8,
+        pady=3,
+        cursor="hand2",
+        command=self.load_properties,
+    ).pack(side=tk.RIGHT, padx=(5, 0))
+
+    fields_frame = tk.Frame(
+        main_frame, bg="#181825", bd=1, relief="solid", padx=15, pady=15
+    )
+    fields_frame.pack(fill="both", expand=True)
+
+    self.prop_entries = {}
+    configs = [
+        ("MOTD (Descrição):", "motd", "entry"),
+        (
+            "Modo de Jogo:",
+            "gamemode",
+            "combo",
+            ["survival", "creative", "adventure", "spectator"],
+        ),
+        (
+            "Dificuldade:",
+            "difficulty",
+            "combo",
+            ["peaceful", "easy", "normal", "hard"],
+        ),
+        ("Máximo de Jogadores:", "max-players", "entry"),
+        ("Porta do Servidor:", "server-port", "entry"),
+        ("Permitir PVP:", "pvp", "combo", ["true", "false"]),
+        ("Modo Online:", "online-mode", "combo", ["true", "false"]),
+        ("Permitir Nether:", "allow-nether", "combo", ["true", "false"]),
+        ("Modo de Voo:", "allow-flight", "combo", ["true", "false"]),
+        ("Distância de Visão:", "view-distance", "entry"),
+    ]
+
+    for label_text, key, widget_type, *opts in configs:
+      row_frame = tk.Frame(fields_frame, bg="#181825")
+      row_frame.pack(fill="x", pady=4)
+      tk.Label(
+          row_frame,
+          text=label_text,
+          fg="#cdd6f4",
+          bg="#181825",
+          font=("Segoe UI", 9, "bold"),
+          width=25,
+          anchor="w",
+      ).pack(side=tk.LEFT)
+
+      if widget_type == "entry":
+        ent = tk.Entry(
+            row_frame,
+            bg="#313244",
+            fg="#cdd6f4",
+            insertbackground="white",
+            font=("Segoe UI", 9),
+            bd=1,
+            relief="flat",
+        )
+        ent.pack(side=tk.LEFT, expand=True, fill="x", ipady=3)
+        self.prop_entries[key] = ent
+      elif widget_type == "combo":
+        cmb = ttk.Combobox(
+            row_frame, values=opts[0], state="readonly", width=18
+        )
+        cmb.pack(side=tk.LEFT)
+        self.prop_entries[key] = cmb
+
+    self.load_properties()
+
+  def load_properties(self):
+    if not os.path.exists(PROP_FILE):
+      return
+    props = {}
+    try:
+      with open(PROP_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+          line = line.strip()
+          if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            props[k.strip()] = v.strip()
+      for key, widget in self.prop_entries.items():
+        val = props.get(key, "")
+        if isinstance(widget, tk.Entry):
+          widget.delete(0, tk.END)
+          widget.insert(0, val)
+        elif isinstance(widget, ttk.Combobox):
+          widget.set(val)
+    except Exception as e:
+      messagebox.showerror("Erro", f"Erro ao ler server.properties:\n{str(e)}")
+
+  def save_properties(self):
+    if not os.path.exists(PROP_FILE):
+      messagebox.showerror("Erro", "server.properties não encontrado.")
+      return
+    lines = []
+    updated_keys = set()
+    try:
+      with open(PROP_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+          raw_line = line.strip()
+          if raw_line and not raw_line.startswith("#") and "=" in raw_line:
+            key = raw_line.split("=", 1)[0].strip()
+            if key in self.prop_entries:
+              val = self.prop_entries[key].get().strip()
+              lines.append(f"{key}={val}\n")
+              updated_keys.add(key)
+            else:
+              lines.append(line)
+          else:
+            lines.append(line)
+      for key, widget in self.prop_entries.items():
+        if key not in updated_keys:
+          lines.append(f"{key}={widget.get().strip()}\n")
+      with open(PROP_FILE, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+      messagebox.showinfo("Sucesso", "server.properties salvo com sucesso!")
+    except Exception as e:
+      messagebox.showerror("Erro", f"Não foi possível salvar:\n{str(e)}")
+
+
+# --- EXECUÇÃO DO APLICATIVO ---
+if __name__ == "__main__":
+  root = tk.Tk()
+  root.title("END-HC - Painel de Controle Integrado")
+
+  if os.path.exists(r"C:\Users\Endryo\Desktop\Meu Server\diamond.ico"):
+    root.iconbitmap(r"C:\Users\Endryo\Desktop\Meu Server\diamond.ico")
+
+  app = LoginWindow(root)
+  root.mainloop()
